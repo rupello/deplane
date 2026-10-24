@@ -1,0 +1,14 @@
+# Python / uv
+.venv/
+__pycache__/
+*.pyc
+
+# Generated outputs
+out*/
+
+# Large media / raw data
+*.fits
+*.fit
+*.mp4
+*.tif
+*.tiff
