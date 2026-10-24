@@ -34,8 +34,17 @@ This writes to `out/`:
 | `startrails.mp4` | time-lapse of the trails building up |
 | `masks.mp4` | (with `--mask-video`) each raw frame with the removed pixels shown in red |
 
+With `--labels` (see [Star labels](#star-labels)) it also writes:
+
+| File | Contents |
+| --- | --- |
+| `startrails_labeled.mp4` | the same movie with fading star (and constellation) names |
+| `stack_labeled.jpg` | the still stack with each identified star labelled along its trail |
+| `solution.json` | fitted camera/sky model, residuals, and each labelled star's first/last visible frame |
+| `solve_check.jpg` | reference frame with detections (green) and predicted catalog stars (rings) |
+
 All frames are held in memory along with their masks and cleaned copies: a
-451-frame 1920x1080 session needs roughly 7 GB of RAM.
+451-frame 1920x1080 session needs about 7 GB of RAM, and a 1440-frame one about 21 GB.
 
 ### Examples
 
@@ -51,6 +60,9 @@ uv run python deplane.py SESSION --last 316 --no-video
 
 # check what is being removed
 uv run python deplane.py SESSION --mask-video
+
+# name the stars as they appear, plus constellation captions
+uv run python deplane.py SESSION --labels --constellations --lat 39.05
 ```
 
 ### Options
@@ -71,6 +83,12 @@ uv run python deplane.py SESSION --mask-video
 | `--fps` | 30 | movie frame rate |
 | `--no-video` | | skip the movie |
 | `--mask-video` | | also write `masks.mp4` |
+| `--labels` | | identify the stars and write the labelled outputs |
+| `--lat` | 39.05 | site latitude in degrees; only used for atmospheric refraction |
+| `--label-mag` | 4.75 | faintest magnitude to label |
+| `--label-hold` | 2.5 | seconds a label stays fully visible (brighter stars a little longer) |
+| `--constellations` | | also fade constellation names in and out |
+| `--font` | bundled Inter | font file to use for labels |
 
 ## How it works
 
@@ -90,9 +108,51 @@ uv run python deplane.py SESSION --mask-video
    `--fade`, the brightness each pixel has above the current frame decays every frame,
    so trails fade into the current sky rather than to black.
 
+## Star labels
+
+![labelled movie frame](docs/labels.jpg)
+
+With `--labels`, deplane works out which stars are in the session and gives each one a
+name tag that follows it for a few seconds as it appears, then fades out. It needs no
+network access or manual input. The code is in `starlabels.py`:
+
+1. **Detect** point sources in every cleaned frame. Static sources (hot pixels, ground
+   lights) and ones that don't persist from frame to frame (flickering foliage, plane
+   strobes) are dropped.
+2. **Plate-solve** one frame by matching triangles of bright stars against the catalog,
+   using the scale from the FITS focal length and pixel size.
+3. **Fit** a model of a fixed camera under a rotating sky (pointing, roll, focal length,
+   optical centre, radial distortion, refraction) to the stars matched across the whole
+   session. Frame times come from `DATE-OBS`, so the rotation rate is the sidereal rate.
+   The sky's rotation angle and the camera's orientation can only be told apart by
+   refraction, so the angle is chosen by a scan; for a field far above the horizon a level
+   camera is assumed instead. This changes the reported pointing, not where labels go.
+4. **Visibility:** each catalog star counts as visible in a frame when a detection is near
+   its predicted position. It's labelled when it first stays visible for a second (stars
+   rising over trees, passing behind them, or leaving the frame are handled this way).
+5. **Schedule** labels so they never overlap, brightest stars first, with at most 15 on
+   screen. Proper names are shown only when they are official IAU names; otherwise the
+   Bayer or Flamsteed designation is used.
+
+On the reference session (1440 frames, Orion rising) the fit's median residual is about
+1.4 px, and the whole run with `--labels --constellations` takes about 4.5 minutes.
+
+### Data and font
+
+- `data/stars.csv` and `data/constellations.csv` are built by `tools/build_catalog.py`
+  from [d3-celestial](https://github.com/ofrohn/d3-celestial) 0.7.35 (BSD-3-Clause, see
+  `data/LICENSE-d3-celestial.txt`) and the
+  [IAU Catalog of Star Names](https://www.pas.rochester.edu/~emamajek/WGSN/IAU-CSN.txt).
+- `fonts/` holds [Inter](https://rsms.me/inter/) 4.1 (SIL Open Font License, `fonts/OFL.txt`).
+
 ## Limitations
 
 - Meteors and satellites are removed along with planes.
 - Sudden lighting changes on the ground (e.g. house lights switching on) are also
   flagged. This does no visible harm, because the replacement is the surrounding frames.
 - Very faint plane strobes can leave a few dim dots; try a lower `--sigma`.
+- Star labels need a reasonably clear sky: in a hazy session where only stars fainter
+  than about magnitude 3.5 show, the plate solve fails and the labelled outputs are
+  skipped with a warning.
+- Planets aren't labelled yet. A bright source that moves with the sky but matches no
+  catalog star is reported in the log.
