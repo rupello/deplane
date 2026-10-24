@@ -5,6 +5,7 @@ __pycache__/
 
 # Generated outputs
 out*/
+[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*/
 
 # Large media / raw data
 *.fits
