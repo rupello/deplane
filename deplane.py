@@ -8,13 +8,17 @@ are masked and replaced with the local background before max-stacking.
 
 import argparse
 import glob
+import logging
 import os
 import subprocess
+import sys
 from concurrent.futures import ThreadPoolExecutor
 
 import cv2
 import numpy as np
 from astropy.io import fits
+
+import starlabels
 
 # OpenCV Bayer codes are named after the 2nd row/col, so BGGR sensor -> BayerRG.
 BAYER = {"BGGR": cv2.COLOR_BayerRG2BGR, "RGGB": cv2.COLOR_BayerBG2BGR,
@@ -100,6 +104,13 @@ class Stretch:
         return (np.clip(y, 0, 1) * 255).astype(np.uint8)
 
 
+def ffmpeg_writer(path, w, h, fps, *opts):
+    cmd = ["ffmpeg", "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "bgr24",
+           "-s", f"{w}x{h}", "-r", str(fps), "-i", "-", "-c:v", "libx264",
+           "-pix_fmt", "yuv420p", *opts, path]
+    return subprocess.Popen(cmd, stdin=subprocess.PIPE)
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("folder")
@@ -119,7 +130,16 @@ def main():
                    help="movie trail half-life in frames (0 = trails never fade)")
     p.add_argument("--no-video", action="store_true")
     p.add_argument("--mask-video", action="store_true", help="also write a video of the masks")
+    g = p.add_argument_group("star labels")
+    g.add_argument("--labels", action="store_true",
+                   help="identify stars and write startrails_labeled.mp4 with fading name tags")
+    g.add_argument("--lat", type=float, default=39.05, help="site latitude in degrees (for refraction)")
+    g.add_argument("--label-mag", type=float, default=4.75, help="faintest magnitude to label")
+    g.add_argument("--label-hold", type=float, default=2.5, help="seconds a label stays fully visible")
+    g.add_argument("--constellations", action="store_true", help="also show constellation names")
+    g.add_argument("--font", help="font file to use instead of the bundled Inter")
     a = p.parse_args()
+    logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
 
     os.makedirs(a.out, exist_ok=True)
     files, frames, hdr = load_frames(a.folder, a.first, a.last)
@@ -146,16 +166,22 @@ def main():
     cv2.imwrite(os.path.join(a.out, "stack_linear16.tif"), (rgb.astype(np.uint32) * 64).clip(0, 65535).astype(np.uint16))
     print("wrote", os.path.join(a.out, "stack.jpg"))
 
+    overlay = None
+    if a.labels:
+        overlay = starlabels.make_overlay(
+            files, frames_c, black, superpixel, lambda f: st(cv2.cvtColor(f, bayer)), img, a.out,
+            a.fps, lat=a.lat, label_mag=a.label_mag, hold=a.label_hold,
+            constellations=a.constellations, font=a.font)
+
+    h, w = stack.shape
     if not a.no_video:
-        h, w = stack.shape
-        cmd = ["ffmpeg", "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "bgr24",
-               "-s", f"{w}x{h}", "-r", str(a.fps), "-i", "-", "-c:v", "libx264",
-               "-pix_fmt", "yuv420p", "-crf", "18", "-preset", "medium",
-               os.path.join(a.out, "startrails.mp4")]
-        ff = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+        ff = ffmpeg_writer(os.path.join(a.out, "startrails.mp4"), w, h, a.fps, "-crf", "18", "-preset", "medium")
+        if overlay:
+            fl = ffmpeg_writer(os.path.join(a.out, "startrails_labeled.mp4"), w, h, a.fps,
+                               "-crf", "18", "-preset", "medium")
         acc = np.zeros(stack.shape, np.float32)
         decay = 0.5 ** (1 / a.fade) if a.fade > 0 else 1.0
-        for f in frames_c:
+        for i, f in enumerate(frames_c):
             f = f.astype(np.float32)
             if decay < 1:
                 # fade the excess over the current frame, so trails decay into
@@ -163,24 +189,24 @@ def main():
                 acc = f + np.maximum(acc - f, 0) * decay
             else:
                 np.maximum(acc, f, out=acc)
-            ff.stdin.write(st(cv2.cvtColor(acc.astype(np.uint16), bayer)).tobytes())
-        ff.stdin.close()
-        ff.wait()
-        print("wrote", cmd[-1])
+            v = st(cv2.cvtColor(acc.astype(np.uint16), bayer))
+            ff.stdin.write(v.tobytes())
+            if overlay:
+                fl.stdin.write(overlay.draw(v, i).tobytes())
+        for proc in [ff] + ([fl] if overlay else []):
+            proc.stdin.close()
+            proc.wait()
+            print("wrote", proc.args[-1])
 
     if a.mask_video and masks is not None:
-        h, w = stack.shape
-        cmd = ["ffmpeg", "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "bgr24",
-               "-s", f"{w}x{h}", "-r", str(a.fps), "-i", "-", "-c:v", "libx264",
-               "-pix_fmt", "yuv420p", "-crf", "23", os.path.join(a.out, "masks.mp4")]
-        ff = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+        ff = ffmpeg_writer(os.path.join(a.out, "masks.mp4"), w, h, a.fps, "-crf", "23")
         for f, m in zip(frames, masks):
             v = st(cv2.cvtColor(f, bayer))
             v[m] = (0.5 * v[m] + (0, 0, 127)).astype(np.uint8)   # red overlay on detections
             ff.stdin.write(v.tobytes())
         ff.stdin.close()
         ff.wait()
-        print("wrote", cmd[-1])
+        print("wrote", ff.args[-1])
 
 
 if __name__ == "__main__":
