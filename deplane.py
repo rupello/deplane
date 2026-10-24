@@ -115,6 +115,8 @@ def main():
     p.add_argument("--sky", type=float, default=0.25, help="output sky brightness 0-1")
     p.add_argument("--white", type=float, default=99.95, help="white point percentile")
     p.add_argument("--saturation", type=float, default=1.3)
+    p.add_argument("--fade", type=float, default=0,
+                   help="movie trail half-life in frames (0 = trails never fade)")
     p.add_argument("--no-video", action="store_true")
     p.add_argument("--mask-video", action="store_true", help="also write a video of the masks")
     a = p.parse_args()
@@ -151,10 +153,17 @@ def main():
                "-pix_fmt", "yuv420p", "-crf", "18", "-preset", "medium",
                os.path.join(a.out, "startrails.mp4")]
         ff = subprocess.Popen(cmd, stdin=subprocess.PIPE)
-        acc = np.zeros_like(stack)
+        acc = np.zeros(stack.shape, np.float32)
+        decay = 0.5 ** (1 / a.fade) if a.fade > 0 else 1.0
         for f in frames_c:
-            np.maximum(acc, f, out=acc)
-            ff.stdin.write(st(cv2.cvtColor(acc, bayer)).tobytes())
+            f = f.astype(np.float32)
+            if decay < 1:
+                # fade the excess over the current frame, so trails decay into
+                # whatever the sky (or lit house) looks like now
+                acc = f + np.maximum(acc - f, 0) * decay
+            else:
+                np.maximum(acc, f, out=acc)
+            ff.stdin.write(st(cv2.cvtColor(acc.astype(np.uint16), bayer)).tobytes())
         ff.stdin.close()
         ff.wait()
         print("wrote", cmd[-1])
