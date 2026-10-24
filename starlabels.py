@@ -30,6 +30,7 @@ SUP = str.maketrans("0123456789", "⁰¹²³⁴⁵⁶⁷⁸⁹")
 # Orion's caption waits for the shoulders, Rigel and the belt (Saiph rises much later)
 ORION_KEY = {27989, 24436, 25336, 26311, 26727, 25930}
 MAX_LABELS = 15                             # most labels on screen at once
+RING_RGB = (255, 220, 140)
 
 
 class SolveError(Exception):
@@ -516,13 +517,13 @@ def label_box(o, f, side):
     return (x - 14 - w, y - 4 - h, x + 12, y + 12)
 
 
-def draw_label(d, fonts, o, x, y, a, side):
+def draw_label(d, rings, fonts, o, x, y, a, side):
+    """Draw a label's text on d and queue its ring in rings (see composite)."""
     s = o["fs"]
     fb, fs = fonts("SemiBold", s), fonts("Regular", s * 0.62)
     main = (255, 244, 225) if o["mag"] < 1 else (240, 240, 240)
     ca = int(255 * a * (1.0 if o["mag"] < 3.6 else 0.85))
-    r = 7 if o["mag"] >= 2.3 else 10
-    d.ellipse((x - r, y - r, x + r, y + r), outline=(255, 220, 140, int(ca * 0.8)), width=2)
+    rings.append((x, y, 7 if o["mag"] >= 2.3 else 10, ca * 0.8))
     w = fb.getlength(o["label"])
     ws = fs.getlength("  " + o["sub"]) if o["sub"] else 0
     tx, ty = (x + 14, y + 4) if side == 0 else (x - 14 - (w + ws + 4), y - 4 - s * 1.15)
@@ -668,15 +669,15 @@ class Overlay:
             for ch in cp["name"]:
                 d.text((x, y), ch, font=font, fill=(170, 200, 255, int(110 * a)))
                 x += font.getlength(ch) + (7 * 2.2 if ch == " " else 7)
+        rings = []
         for o in self.labels:
             a = self._alpha(o["t0"], o["life"], self.fin, self.fout, f)
             if a > 0:
                 busy = True
-                draw_label(d, self.fonts, o, o["x"][f], o["y"][f], a, o["side"])
+                draw_label(d, rings, self.fonts, o, o["x"][f], o["y"][f], a, o["side"])
         if not busy:
             return bgr
-        img = Image.alpha_composite(Image.fromarray(bgr[..., ::-1]).convert("RGBA"), layer)
-        return np.ascontiguousarray(np.asarray(img.convert("RGB"))[..., ::-1])
+        return composite(bgr, rings, layer)
 
     def active(self, f):
         return sum(self._alpha(o["t0"], o["life"], self.fin, self.fout, f) > 0 for o in self.labels)
@@ -687,7 +688,7 @@ def label_stack(img, stars, fonts):
     H, W = img.shape[:2]
     layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     d = ImageDraw.Draw(layer)
-    boxes = []
+    boxes, rings = [], []
     for o in sorted(stars, key=lambda o: o["mag"]):
         # the latest point of the trail well inside the frame, stepping back on collisions
         x, y = o["x"][:o["end"] + 1], o["y"][:o["end"] + 1]
@@ -698,13 +699,31 @@ def label_stack(img, stars, fonts):
                 b = label_box(o, f, side)
                 if b[0] >= 4 and b[2] <= W - 4 and b[1] >= 4 and b[3] <= H - 4 and not any(overlaps(b, q) for q in boxes):
                     boxes.append(b)
-                    draw_label(d, fonts, o, o["x"][f], o["y"][f], 1.0, side)
+                    draw_label(d, rings, fonts, o, o["x"][f], o["y"][f], 1.0, side)
                     done = True
                     break
             if done:
                 break
-    out = Image.alpha_composite(Image.fromarray(img[..., ::-1]).convert("RGBA"), layer)
-    return np.asarray(out.convert("RGB"))[..., ::-1]
+    return composite(img, rings, layer)
+
+
+def composite(bgr, rings, layer):
+    """Overlay rings (x, y, radius, alpha) and then the text layer onto a BGR frame.
+    Rings are drawn anti-aliased at 1/16 px so they glide with their stars; Pillow's
+    ellipses snap to whole pixels and visibly jitter."""
+    H, W = bgr.shape[:2]
+    img = Image.fromarray(bgr[..., ::-1]).convert("RGBA")
+    if rings:
+        mask = np.zeros((H, W), np.uint8)
+        for x, y, r, a in rings:
+            cv2.circle(mask, (int(round(x * 16)), int(round(y * 16))), int(round((r - 1) * 16)),
+                       int(a), 2, cv2.LINE_AA, 4)
+        ring = np.empty((H, W, 4), np.uint8)
+        ring[..., :3] = RING_RGB
+        ring[..., 3] = mask
+        img = Image.alpha_composite(img, Image.fromarray(ring, "RGBA"))
+    img = Image.alpha_composite(img, layer)
+    return np.ascontiguousarray(np.asarray(img.convert("RGB"))[..., ::-1])
 
 
 # ---------------------------------------------------------------- entry point
